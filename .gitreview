@@ -1,0 +1,7 @@
+[gerrit]
+host=review.gerrithub.io
+port=29418
+project=DataSCCource/reviewchecklist-gerrit-plugin
+defaultbranch=main
+defaultremote=origin
+defaultrebase=0
