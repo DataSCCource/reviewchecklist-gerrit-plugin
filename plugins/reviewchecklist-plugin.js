@@ -14,23 +14,61 @@
 const pluginName = "reviewchecklist-plugin";
 
 const checklistTemplate = Polymer.html`
-<hr />
-<div>
-    <div style="font-weight:bold">Review Checklist:</div>
-    <input type="checkbox" name="checkboxgroup" id="cb1"> <label for="cb1">Checkpoint 1</label> <br />
-    <input type="checkbox" name="checkboxgroup" id="cb2"> <label for="cb2">Checkpoint 2</label> <br />
-    <input type="checkbox" name="checkboxgroup" id="cb3"> <label for="cb3">Checkpoint 3</label> <br />
-</div>
+<dom-module>
+    <template is="dom-if" if="[[checklistPoints.length]]">
+        <hr style="height:1px;border:none;background-color:#BBB"/>
+        <div style="font-weight:bold;">Review Checklist:</div>
+        
+        <template is="dom-repeat" items="[[checklistPoints]]">
+            <label>
+            <input type="checkbox" name="checkboxgroup" checked$="{{item.checked}}"> 
+            [[item.checkpoint]]
+            </label> 
+            <template is="dom-if" if="[[item.mandatory]]"><b>*</b></template>
+            <br />
+        </template>
+        <template is="dom-if" if="[[mandatoryCheckpoint]]"><b>*</b> -> <i>Checkpoint is mandatory</i></template>
+
+    </template>
+</dom-module>
 `;
+
+const cpList = [];
 
 class ReviewChecklist extends Polymer.Element {
     static get is() { return pluginName; }
     static get template() { return checklistTemplate; }
+    static get properties() {
+        return {
+            checklistPoints: {
+                type: Array,
+                value() {
+                    return []
+                }
+                
+            },
+            mandatoryCheckpoint: Boolean,
+        };
+    }
+    constructor() {
+        super();
+        
+        // TODO: read list from json-file
+        cpList.push({checkpoint: "Checkpoint 1", mandatory: true});
+        cpList.push({checkpoint: "Checkpoint 2", mandatory: false});
+        cpList.push({checkpoint: "Checkpoint 3"});
+        console.log(cpList);
+        
+        for(var i=0; i<cpList.length; i++) {
+            this.checklistPoints.push({checkpoint: cpList[i].checkpoint, mandatory: cpList[i].mandatory, checked: false});
+            if(cpList[i].mandatory == true) this.mandatoryCheckpoint = true;
+        }
+    }
 }
 
 customElements.define(ReviewChecklist.is, ReviewChecklist);
 
 Gerrit.install(plugin => {
-    plugin.registerCustomComponent('reply-text', pluginName, {replace: false}).onAttached(changeElement => {
+    plugin.registerCustomComponent('reply-text', pluginName).onAttached(changeElement => {
     });
 });
