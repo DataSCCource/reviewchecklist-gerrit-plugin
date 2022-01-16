@@ -32,7 +32,7 @@ const checklistTemplate = Polymer.html`
 
         <template is="dom-repeat" items="[[checklistPoints]]">
             <label>
-            <input type="checkbox" name="checkboxgroup" checked="{{item.checked::change}}">
+            <input type="checkbox" name="checkboxgroup" checked="{{item.checked::change}}" onchange="checkboxClicked(this)" data-mandatory="[[item.mandatory]]" />
             <template is="dom-if" if="[[item.mandatory]]"><b>*</b></template>[[item.checkpoint]]
             </label>
             <br />
@@ -43,6 +43,40 @@ const checklistTemplate = Polymer.html`
 </dom-module>
 `;
 
+var hookElement;
+var replyApi;
+
+function checkboxClicked(checkbox) {
+    if(!checkbox.checked && checkbox.dataMandatory) {
+        evaluateCodeReviewLabel("Code-Review", true);
+    }
+}
+
+function evaluateCodeReviewLabel(name, uncheckedMandatory) {
+    if(hookElement.checkpointsExists) {
+        // search for unchecked mandatory list item
+        var uncheckedMandatoryItems = uncheckedMandatory?1:0;
+        for (let i = 0; i < hookElement.checklistPoints.length; i++) {
+            if(!hookElement.checklistPoints[i].checked && hookElement.checklistPoints[i].mandatory) {
+                uncheckedMandatoryItems++;
+            }
+        }
+
+        if (replyApi.getLabelValue('Code-Review') === '+2' && uncheckedMandatoryItems != 0) {
+            replyApi.setLabelValue('Code-Review', '+1');
+
+            // message below review labels
+            replyApi.showMessage('ATTENTION: mandatory checkpoints need to be checked, to set +2 on Code-Review label!');
+
+            // show toast notification
+            var toast = document.createElement('gr-alert');
+            toast.show(`${uncheckedMandatory?"Code-Review label was downgraded to \"+1\".":"You cannot vote \"+2\" for Code-Review label!"} ${uncheckedMandatoryItems} mandatory checklist item(s) still unchecked.`);
+            setTimeout(function() {toast.hide();}, 3000);
+        } else if (name === 'Code-Review') {
+            replyApi.showMessage('');
+        }
+    }
+}
 
 class ReviewChecklist extends Polymer.Element {
     static get is() { return pluginName; }
@@ -64,7 +98,6 @@ class ReviewChecklist extends Polymer.Element {
 customElements.define(ReviewChecklist.is, ReviewChecklist);
 
 Gerrit.install(plugin => {
-    var hookElement;
 
     plugin.registerCustomComponent(pluginHook, pluginName).onAttached(changeElement => {
         // "save" element-reference for later use
@@ -112,31 +145,8 @@ Gerrit.install(plugin => {
     }
 
     // prevent +2 Code-Review label if mandatory checklistpoint is not checked
-    const replyApi = plugin.changeReply();
+    replyApi = plugin.changeReply();
     replyApi.addLabelValuesChangedCallback(({name, value}) => {
-        if(hookElement.checkpointsExists)
-        {
-            // search for unchecked mandatory list item
-            var uncheckedMandatoryItems = 0;
-            for (let i = 0; i < hookElement.checklistPoints.length; i++) {
-                if(!hookElement.checklistPoints[i].checked && hookElement.checklistPoints[i].mandatory) {
-                    uncheckedMandatoryItems++;
-                }
-            }
-
-            if (replyApi.getLabelValue('Code-Review') === '+2' && uncheckedMandatoryItems != 0) {
-                replyApi.setLabelValue('Code-Review', '+1');
-
-                // message below review labels
-                replyApi.showMessage('ATTENTION: mandatory checkpoints need to be checked, to set +2 on Code-Review label!');
-
-                // show toast notification
-                var toast = document.createElement('gr-alert');
-                toast.show(`${uncheckedMandatoryItems} mandatory checklist item(s) still unchecked! Please reevaluate.`);
-                setTimeout(function() {toast.hide();}, 2000);
-            } else if (name === 'Code-Review') {
-                replyApi.showMessage('');
-            }
-        }
+        evaluateCodeReviewLabel(name, false);
     });
 });
