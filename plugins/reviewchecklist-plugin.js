@@ -16,7 +16,7 @@
  *              {"checkpoint": "Checkpoint 3 (not mandatory)"}
  *          ]
  *        'checkpoint' - string of a checklist item
- *        'mandatory' is optional - can be true, false or omitted
+ *        'mandatory' is optional - can be true, false or omitted; prevents Code-Review +2
  * @requires gitiles plugin to get access to the .review-checklist.json file containing the repo specific checklist.
  */
 
@@ -32,7 +32,7 @@ const checklistTemplate = Polymer.html`
 
         <template is="dom-repeat" items="[[checklistPoints]]">
             <label>
-            <input type="checkbox" name="checkboxgroup" checked$="{{item.checked}}">
+            <input type="checkbox" name="checkboxgroup" checked="{{item.checked::change}}">
             <template is="dom-if" if="[[item.mandatory]]"><b>*</b></template>[[item.checkpoint]]
             </label>
             <br />
@@ -110,4 +110,33 @@ Gerrit.install(plugin => {
             if(checklistArray[i].mandatory == true) hookElement.mandatoryCheckpointExists = true;
         }
     }
+
+    // prevent +2 Code-Review label if mandatory checklistpoint is not checked
+    const replyApi = plugin.changeReply();
+    replyApi.addLabelValuesChangedCallback(({name, value}) => {
+        if(hookElement.checkpointsExists)
+        {
+            // search for unchecked mandatory list item
+            var uncheckedMandatoryItems = 0;
+            for (let i = 0; i < hookElement.checklistPoints.length; i++) {
+                if(!hookElement.checklistPoints[i].checked && hookElement.checklistPoints[i].mandatory) {
+                    uncheckedMandatoryItems++;
+                }
+            }
+
+            if (replyApi.getLabelValue('Code-Review') === '+2' && uncheckedMandatoryItems != 0) {
+                replyApi.setLabelValue('Code-Review', '+1');
+
+                // message below review labels
+                replyApi.showMessage('ATTENTION: mandatory checkpoints need to be checked, to set +2 on Code-Review label!');
+
+                // show toast notification
+                var toast = document.createElement('gr-alert');
+                toast.show(`${uncheckedMandatoryItems} mandatory checklist item(s) still unchecked! Please reevaluate.`);
+                setTimeout(function() {toast.hide();}, 2000);
+            } else if (name === 'Code-Review') {
+                replyApi.showMessage('');
+            }
+        }
+    });
 });
