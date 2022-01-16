@@ -11,11 +11,12 @@
  * @usage Copy .js file to plugins folder of your Gerrit installation and wait a minute
  */
 
-const pluginName = "reviewchecklist-plugin";
+const pluginName = 'reviewchecklist-plugin';
+const pluginHook = 'reply-text';
 
 const checklistTemplate = Polymer.html`
 <dom-module>
-    <template is="dom-if" if="[[checklistPoints.length]]">
+    <template is="dom-if" if="[[checkpointsExists]]">
         <hr style="height:1px;border:none;background-color:#BBB"/>
         <div style="font-weight:bold;">Review Checklist:</div>
 
@@ -32,7 +33,6 @@ const checklistTemplate = Polymer.html`
 </dom-module>
 `;
 
-const cpList = [];
 
 class ReviewChecklist extends Polymer.Element {
     static get is() { return pluginName; }
@@ -45,27 +45,31 @@ class ReviewChecklist extends Polymer.Element {
                     return []
                 }
             },
+            checkpointsExists: Boolean,
             mandatoryCheckpointExists: Boolean,
         };
-    }
-    constructor() {
-        super();
-
-        // TODO: read list from json-file
-        cpList.push({checkpoint: "Checkpoint 1", mandatory: true});
-        cpList.push({checkpoint: "Checkpoint 2", mandatory: false});
-        cpList.push({checkpoint: "Checkpoint 3"});
-
-        for(var i=0; i<cpList.length; i++) {
-            this.checklistPoints.push({checkpoint: cpList[i].checkpoint, mandatory: cpList[i].mandatory, checked: false});
-            if(cpList[i].mandatory == true) this.mandatoryCheckpointExists = true;
-        }
     }
 }
 
 customElements.define(ReviewChecklist.is, ReviewChecklist);
 
 Gerrit.install(plugin => {
-    plugin.registerCustomComponent('reply-text', pluginName).onAttached(changeElement => {
+    var hookElement;
+
+    plugin.registerCustomComponent(pluginHook, pluginName).onAttached(changeElement => {
+        // "save" element-reference for later use
+        hookElement = changeElement;
+
+        // TODO: read list from json-file
+        const cpList = [];
+        cpList.push({checkpoint: "Checkpoint 1", mandatory: true});
+        cpList.push({checkpoint: "Checkpoint 2", mandatory: false});
+        cpList.push({checkpoint: "Checkpoint 3"});
+
+        for(var i=0; i<cpList.length; i++) {
+            hookElement.checkpointsExists = true;
+            hookElement.checklistPoints.push({checkpoint: cpList[i].checkpoint, mandatory: cpList[i].mandatory, checked: false});
+            if(cpList[i].mandatory == true) hookElement.mandatoryCheckpointExists = true;
+        }
     });
 });
