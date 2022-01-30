@@ -107,6 +107,12 @@ Gerrit.install(plugin => {
         const filePath = `/plugins/gitiles/${repoName}/+/refs/heads/master/${fileName}?format=text`;
         var cpList = [];
 
+        // save current_revision id
+        plugin.restApi().get(`/changes/${plugin.report.reportChangeId}?o=CURRENT_REVISION`).then(changeInfo => {
+            plugin.report.revisionId = changeInfo.current_revision
+        });
+
+
         fetch(filePath)
         .then(response=>response.text())
         .then(data => {
@@ -129,6 +135,18 @@ Gerrit.install(plugin => {
             //    {checkpoint: "Checkpoint 3"}
             //];
             fillChecklist(cpList);
+        });
+        
+        const sendButton = hookElement.parentNode.host.parentNode.parentNode.querySelector(".stickyBottom").querySelector(".actions").querySelector(".right").querySelector("#sendButton").root.querySelector("paper-button");
+        sendButton.addEventListener("click", () => {
+            var checklistString = "Checklist:";
+            for (let i = 0; i < hookElement.checklistPoints.length; i++) {
+                checklistString += `\n[${hookElement.checklistPoints[i].checked?"X":" "}] `
+                                + hookElement.checklistPoints[i].checkpoint;
+            }
+
+            const reviewInput = `{"message": "${checklistString}", "notify": "NONE"}`;
+            plugin.restApi().post(`/changes/${plugin.report.reportChangeId}/revisions/${plugin.report.revisionId}/review`, reviewInput);
         });
     });
 
