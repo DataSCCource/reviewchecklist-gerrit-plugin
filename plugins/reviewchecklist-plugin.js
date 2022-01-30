@@ -106,12 +106,7 @@ Gerrit.install(plugin => {
 
         const filePath = `/plugins/gitiles/${repoName}/+/refs/heads/master/${fileName}?format=text`;
         var cpList = [];
-
-        // save current_revision id
-        plugin.restApi().get(`/changes/${plugin.report.reportChangeId}?o=CURRENT_REVISION`).then(changeInfo => {
-            plugin.report.revisionId = changeInfo.current_revision
-        });
-
+        var cpStatus = [];
 
         fetch(filePath)
         .then(response=>response.text())
@@ -122,7 +117,6 @@ Gerrit.install(plugin => {
                 urlArray.forEach(function(checkpoint) {
                     cpList.push({checkpoint: checkpoint.checkpoint, mandatory: checkpoint.mandatory});
                 });
-                fillChecklist(cpList);
             }
         })
         .catch(()=> {
@@ -134,7 +128,32 @@ Gerrit.install(plugin => {
             //    {checkpoint: "Checkpoint 2", mandatory: false},
             //    {checkpoint: "Checkpoint 3"}
             //];
-            fillChecklist(cpList);
+            fillChecklist(cpList, cpStatus);
+        });
+
+       plugin.restApi().get('/accounts/self').then(accountInfo => {
+            // save _account_id
+            plugin.report.accountId = accountInfo._account_id
+        });
+
+        plugin.restApi().get(`/changes/${plugin.report.reportChangeId}?o=CURRENT_REVISION&o=MESSAGES`).then(changeInfo => {
+            // save current_revision id
+            plugin.report.revisionId = changeInfo.current_revision
+            
+            // get status of checklistpoints
+            for (let i = changeInfo.messages.length-1; i >= 0; i--) {
+                const messageArray = changeInfo.messages[i].message.split("\n");
+                const authorId = changeInfo.messages[i].author._account_id;
+                if(authorId == plugin.report.accountId && messageArray[2] == "Checklist:") {
+                    console.log("!!!FOUND!!!");
+                    for (let j = 3; j < messageArray.length; j++) {
+                        cpStatus.push({checkpoint: messageArray[j].substring(4), checked: (messageArray[j].substring(1,2)=="X"?true:false) });
+                    }
+                    fillChecklist(cpList, cpStatus);
+
+                    break;
+                }
+            }
         });
         
         const sendButton = hookElement.parentNode.host.parentNode.parentNode.querySelector(".stickyBottom").querySelector(".actions").querySelector(".right").querySelector("#sendButton").root.querySelector("paper-button");
@@ -150,14 +169,14 @@ Gerrit.install(plugin => {
         });
     });
 
-    function fillChecklist(checklistArray) {
+    function fillChecklist(checklistArray, checklistStatus) {
         hookElement.checklistPoints = [];
         hookElement.checkpointsExists = false;
         hookElement.mandatoryCheckpointExists = false;
 
         for(var i=0; i<checklistArray.length; i++) {
             hookElement.checkpointsExists = true;
-            hookElement.checklistPoints.push({checkpoint: checklistArray[i].checkpoint, mandatory: checklistArray[i].mandatory, checked: false});
+            hookElement.checklistPoints.push({checkpoint: checklistArray[i].checkpoint, mandatory: checklistArray[i].mandatory, checked: checklistStatus[i].checked});
             if(checklistArray[i].mandatory == true) hookElement.mandatoryCheckpointExists = true;
         }
     }
