@@ -1,0 +1,27 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "c46b2110_50980d63",
+        "filename": "plugins/reviewchecklist-plugin.js",
+        "patchSetId": 1
+      },
+      "lineNbr": 139,
+      "author": {
+        "id": 1017332
+      },
+      "writtenOn": "2022-04-07T15:20:47Z",
+      "side": 1,
+      "message": "remove",
+      "range": {
+        "startLine": 139,
+        "startChar": 0,
+        "endLine": 139,
+        "endChar": 8
+      },
+      "revId": "df58733bf1eb2e58a1c386197211de2fd3e19f36",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
