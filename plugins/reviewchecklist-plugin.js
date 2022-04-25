@@ -2,21 +2,23 @@
  * Review checklist plugin for Gerrit
  *
  * Adds a checklist to the changeview of a gerrit change for configured repositories.
+ * Only works with Gerrit 3.4 right now!
  *
  * @link https://github.com/DataSCCource/reviewchecklist-gerrit-plugin
- * @version 0.1 (work-in-progress)
+ * @version 0.2 (work-in-progress)
  * @author Dennis W. (DataSCCource)
  * @since January 2022
  *
  * @usage Copy .js file to plugins folder of your Gerrit installation and wait a minute.
  *        Add .review-checklist.json file to your repository with the following format:
  *          [
- *              {"checkpoint": "Checkpoint 1 (mandatory)", "mandatory": true},
+ *              {"checkpoint": "Checkpoint 1 (mandatory)", "mandatory": true, "resetOnNewPatchset": true},
  *              {"checkpoint": "Checkpoint 2 (not mandatory)", "mandatory": false},
  *              {"checkpoint": "Checkpoint 3 (not mandatory)"}
  *          ]
  *        'checkpoint' - string of a checklist item
  *        'mandatory' is optional - can be true, false or omitted; prevents Code-Review +2
+ *        'resetOnNewPatchset' is optional - can be true, false or omitted
  * @requires gitiles plugin to get access to the .review-checklist.json file containing the repo specific checklist.
  */
 
@@ -115,7 +117,7 @@ Gerrit.install(plugin => {
                 const urlArray = JSON.parse(atob(data));
 
                 urlArray.forEach(function(checkpoint) {
-                    cpList.push({checkpoint: checkpoint.checkpoint, mandatory: checkpoint.mandatory});
+                    cpList.push({checkpoint: checkpoint.checkpoint, mandatory: checkpoint.mandatory, resetOnNewPatchset: checkpoint.resetOnNewPatchset});
                 });
                 console.log(`# Review Checklist loaded from repository with ${cpList.length} item(s)`);
             }
@@ -125,7 +127,7 @@ Gerrit.install(plugin => {
 
             /* Default checklist; uncomment and fill the following lines if you want a default */
             //cpList = [
-            //    {checkpoint: "Checkpoint 1", mandatory: true},
+            //    {checkpoint: "Checkpoint 1", mandatory: true, resetOnNewPatchset: true},
             //    {checkpoint: "Checkpoint 2", mandatory: false},
             //    {checkpoint: "Checkpoint 3"}
             //];
@@ -139,7 +141,9 @@ Gerrit.install(plugin => {
 
         plugin.restApi().get(`/changes/${plugin.report.reportChangeId}?o=CURRENT_REVISION&o=MESSAGES`).then(changeInfo => {
             // save current_revision id
-            plugin.report.revisionId = changeInfo.current_revision
+            plugin.report.revisionId = changeInfo.current_revision;
+            // save revision number, which is the first (and only) revision in the changeInfo, since "CURRENT_REVISION" was requested
+            plugin.report.revisionNumber = changeInfo.revisions[Object.keys(changeInfo.revisions)[0]]._number;
 
             // get status of checklistpoints
             for (let i = changeInfo.messages.length-1; i >= 0; i--) {
@@ -147,7 +151,9 @@ Gerrit.install(plugin => {
                 const authorId = changeInfo.messages[i].author._account_id;
                 if(authorId == plugin.report.accountId && messageArray[2] == "Checklist:") {
                     for (let j = 3; j < messageArray.length; j++) {
-                        cpStatus.push({checkpoint: messageArray[j].substring(4), checked: (messageArray[j].substring(1,2)=="X"?true:false) });
+                        var checked = (messageArray[j].substring(1,2)=="X");
+                        var differentPatchset = (plugin.report.revisionNumber != changeInfo.messages[i]._revision_number);
+                        cpStatus.push({checkpoint: messageArray[j].substring(4), checked: (checked?true:false), differentPatchset: differentPatchset });
                     }
 
                     break;
@@ -177,7 +183,7 @@ Gerrit.install(plugin => {
 
         for(var i=0; i<checklistArray.length; i++) {
             hookElement.checkpointsExists = true;
-            var checked = checklistStatus[i] && checklistStatus[i].checked;
+            var checked = checklistStatus[i] && checklistStatus[i].checked && !(checklistArray[i].resetOnNewPatchset && checklistStatus[i].differentPatchset);
             hookElement.checklistPoints.push({checkpoint: checklistArray[i].checkpoint, mandatory: checklistArray[i].mandatory, checked: checked});
             if(checklistArray[i].mandatory == true) hookElement.mandatoryCheckpointExists = true;
         }
