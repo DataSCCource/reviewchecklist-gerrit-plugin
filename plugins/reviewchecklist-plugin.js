@@ -1,197 +1,324 @@
 /**
  * Review checklist plugin for Gerrit
  *
- * Adds a checklist to the changeview of a gerrit change for configured repositories.
- * Only works with Gerrit 3.4 right now!
+ * Adds a checklist to the reply dialog of a Gerrit change for configured repositories.
+ * Tested with Gerrit 3.14.
  *
  * @link https://github.com/DataSCCource/reviewchecklist-gerrit-plugin
- * @version 0.2 (work-in-progress)
+ * @version 0.3
  * @author Dennis W. (DataSCCource)
  * @since January 2022
  *
- * @usage Copy .js file to plugins folder of your Gerrit installation and wait a minute.
- *        Add .review-checklist.json file to your repository with the following format:
+ * @usage Copy .js file to the plugins folder of your Gerrit installation and wait a minute.
+ *        Add a .review-checklist.json file to the target branch of your repository:
  *          [
  *              {"checkpoint": "Checkpoint 1 (mandatory)", "mandatory": true, "resetOnNewPatchset": true},
  *              {"checkpoint": "Checkpoint 2 (not mandatory)", "mandatory": false},
  *              {"checkpoint": "Checkpoint 3 (not mandatory)"}
  *          ]
- *        'checkpoint' - string of a checklist item
- *        'mandatory' is optional - can be true, false or omitted; prevents Code-Review +2
- *        'resetOnNewPatchset' is optional - can be true, false or omitted
- * @requires gitiles plugin to get access to the .review-checklist.json file containing the repo specific checklist.
+ *        'checkpoint'         - text of a checklist item
+ *        'mandatory'          - optional; unchecked mandatory items prevent Code-Review +2
+ *        'resetOnNewPatchset' - optional; item is unchecked again when a new patch set is uploaded
+ *
+ *        The state of the checklist is stored in the review message of each reply.
+ *        Note: the +2 restriction is enforced in the web UI only, not on the server.
  */
 
-const pluginName = 'reviewchecklist-plugin';
-const pluginHook = 'reply-text';
-const fileName = '.review-checklist.json';
+const PLUGIN_ELEMENT = 'reviewchecklist-plugin';
+const CHECKLIST_FILE = '.review-checklist.json';
+const CODE_REVIEW = 'Code-Review';
+const MESSAGE_HEADER = 'Review checklist:';
+// Header written by version 0.2 of this plugin, still understood when reading.
+const LEGACY_MESSAGE_HEADER = 'Checklist:';
 
-const checklistTemplate = Polymer.html`
-<dom-module>
-    <template is="dom-if" if="[[checkpointsExists]]">
-        <hr style="height:1px;border:none;background-color:#BBB"/>
-        <div style="font-weight:bold;">Review Checklist:</div>
+/** The checklist element of the currently open reply dialog. */
+let activeChecklist = null;
 
-        <template is="dom-repeat" items="[[checklistPoints]]">
-            <label>
-            <input type="checkbox" name="checkboxgroup" checked="{{item.checked::change}}" onchange="checkboxClicked(this)" data-mandatory="[[item.mandatory]]" />
-            <template is="dom-if" if="[[item.mandatory]]"><b>*</b></template>[[item.checkpoint]]
-            </label>
-            <br />
-        </template>
-        <template is="dom-if" if="[[mandatoryCheckpointExists]]"><b>*</b> - <i>Checkpoint is mandatory</i></template>
-
-    </template>
-</dom-module>
-`;
-
-var hookElement;
-var replyApi;
-
-function checkboxClicked(checkbox) {
-    if(!checkbox.checked && checkbox.dataMandatory) {
-        evaluateCodeReviewLabel("Code-Review", true);
-    }
+function labelValueAsNumber(value) {
+  if (value === undefined || value === null || value === '') return 0;
+  const n = Number(String(value).trim().replace('+', ''));
+  return Number.isNaN(n) ? 0 : n;
 }
 
-function evaluateCodeReviewLabel(name, uncheckedMandatory) {
-    if(hookElement.checkpointsExists) {
-        // search for unchecked mandatory list item
-        var uncheckedMandatoryItems = uncheckedMandatory?1:0;
-        for (let i = 0; i < hookElement.checklistPoints.length; i++) {
-            if(!hookElement.checklistPoints[i].checked && hookElement.checklistPoints[i].mandatory) {
-                uncheckedMandatoryItems++;
-            }
-        }
-
-        if (replyApi.getLabelValue('Code-Review') === '+2' && uncheckedMandatoryItems != 0) {
-            replyApi.setLabelValue('Code-Review', '+1');
-
-            // message below review labels
-            replyApi.showMessage('ATTENTION: mandatory checkpoints need to be checked, to set +2 on Code-Review label!');
-
-            // show toast notification
-            var toast = document.createElement('gr-alert');
-            toast.show(`${uncheckedMandatory?"Code-Review label was downgraded to \"+1\".":"You cannot vote \"+2\" for Code-Review label!"} ${uncheckedMandatoryItems} mandatory checklist item(s) still unchecked.`);
-            setTimeout(function() {toast.hide();}, 3000);
-        } else if (name === 'Code-Review') {
-            replyApi.showMessage('');
-        }
-    }
+function decodeBase64Utf8(text) {
+  const binary = atob(text.trim());
+  const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
 }
 
-class ReviewChecklist extends Polymer.Element {
-    static get is() { return pluginName; }
-    static get template() { return checklistTemplate; }
-    static get properties() {
-        return {
-            checklistPoints: {
-                type: Array,
-                value() {
-                    return []
-                }
-            },
-            checkpointsExists: Boolean,
-            mandatoryCheckpointExists: Boolean,
-        };
-    }
+function currentPatchsetNumber(change) {
+  if (change.current_revision_number) return change.current_revision_number;
+  const revisions = Object.values(change.revisions || {});
+  return revisions.reduce((max, r) => Math.max(max, Number(r._number) || 0), 0);
 }
 
-customElements.define(ReviewChecklist.is, ReviewChecklist);
+/**
+ * Finds the checklist state stored in the latest review message of the given account.
+ * Returns {patchset, states: Map<checkpointText, boolean>} or null.
+ */
+function parseSavedState(messages, accountId) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (!msg.author || msg.author._account_id !== accountId) continue;
+    const lines = (msg.message || '').split('\n');
+    const start = lines.findIndex(
+      l => l.trim() === MESSAGE_HEADER || l.trim() === LEGACY_MESSAGE_HEADER
+    );
+    if (start < 0) continue;
+    const states = new Map();
+    for (let j = start + 1; j < lines.length; j++) {
+      const m = /^\[([xX ])\] (.*)$/.exec(lines[j]);
+      if (!m) break;
+      states.set(m[2].trim(), m[1] !== ' ');
+    }
+    return {patchset: msg._revision_number, states};
+  }
+  return null;
+}
+
+class ReviewChecklist extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({mode: 'open'});
+    this.items = [];
+    this._loadedKey = undefined;
+  }
+
+  // Set by Gerrit's endpoint decorator via <gr-endpoint-param name="change">.
+  set change(change) {
+    this._change = change;
+    if (!change || !this.plugin) return;
+    // Reload when switching changes, on new patch sets and on new messages.
+    const key = `${change._number}/${currentPatchsetNumber(change)}/${(change.messages || []).length}`;
+    if (key === this._loadedKey) return;
+    this._loadedKey = key;
+    this.load(change);
+  }
+
+  get change() {
+    return this._change;
+  }
+
+  connectedCallback() {
+    activeChecklist = this;
+    if (this._change && this._loadedKey === undefined) this.change = this._change;
+  }
+
+  disconnectedCallback() {
+    if (activeChecklist === this) activeChecklist = null;
+  }
+
+  async load(change) {
+    try {
+      const [config, account, messages] = await Promise.all([
+        this.loadConfig(change),
+        this.plugin.restApi().getAccount(),
+        change.messages
+          ? Promise.resolve(change.messages)
+          : this.plugin.restApi().get(`/changes/${change._number}/messages`),
+      ]);
+      // Ignore results of an outdated request.
+      if (this._change !== change) return;
+
+      const saved = account ? parseSavedState(messages || [], account._account_id) : null;
+      const patchset = currentPatchsetNumber(change);
+      this.items = config.map(cp => {
+        let checked = !!(saved && saved.states.get(cp.checkpoint));
+        if (checked && cp.resetOnNewPatchset && saved.patchset !== patchset) checked = false;
+        return {checkpoint: cp.checkpoint, mandatory: !!cp.mandatory, checked};
+      });
+      this._downgraded = false;
+      this.render();
+    } catch (err) {
+      console.error('[reviewchecklist] failed to load checklist', err);
+      this.items = [];
+      this.render();
+    }
+  }
+
+  async loadConfig(change) {
+    const url =
+      `/projects/${encodeURIComponent(change.project)}` +
+      `/branches/${encodeURIComponent(change.branch)}` +
+      `/files/${encodeURIComponent(CHECKLIST_FILE)}/content`;
+    // errFn suppresses Gerrit's error dialog when the file does not exist.
+    const response = await this.plugin.restApi().fetch('GET', url, undefined, () => {});
+    if (!response || !response.ok) return [];
+    const parsed = JSON.parse(decodeBase64Utf8(await response.text()));
+    if (!Array.isArray(parsed)) throw new Error(`${CHECKLIST_FILE} must contain a JSON array`);
+    return parsed.filter(cp => cp && typeof cp.checkpoint === 'string' && cp.checkpoint.trim());
+  }
+
+  uncheckedMandatoryCount() {
+    return this.items.filter(i => i.mandatory && !i.checked).length;
+  }
+
+  toStateMessage() {
+    return [MESSAGE_HEADER, ...this.items.map(i => `[${i.checked ? 'X' : ' '}] ${i.checkpoint}`)].join('\n');
+  }
+
+  alert(message) {
+    this.dispatchEvent(
+      new CustomEvent('show-alert', {detail: {message, showDismiss: true}, bubbles: true, composed: true})
+    );
+  }
+
+  /** Downgrades Code-Review +2 to +1 in the reply dialog if mandatory items are unchecked. */
+  enforceMandatory() {
+    const unchecked = this.uncheckedMandatoryCount();
+    const replyApi = this.plugin.changeReply();
+    const downgraded = unchecked > 0 && labelValueAsNumber(replyApi.getLabelValue(CODE_REVIEW)) === 2;
+    if (downgraded) replyApi.setLabelValue(CODE_REVIEW, '+1');
+    this.updateWarning(downgraded);
+  }
+
+  /**
+   * Shows a warning banner inside the checklist after a downgrade and highlights the
+   * unchecked mandatory items, until all of them are checked.
+   */
+  updateWarning(downgraded) {
+    const root = this.shadowRoot;
+    const banner = root.querySelector('.warning');
+    if (!banner) return;
+
+    const unchecked = this.uncheckedMandatoryCount();
+    if (downgraded) this._downgraded = true;
+    if (unchecked === 0) this._downgraded = false;
+    const show = !!this._downgraded;
+
+    for (const label of root.querySelectorAll('label[data-mandatory]')) {
+      label.classList.toggle('missing', show && !label.querySelector('input').checked);
+    }
+
+    banner.hidden = !show;
+    if (!show) return;
+    banner.querySelector('.text').textContent =
+      `${CODE_REVIEW} +2 was downgraded to +1: ${unchecked} mandatory item(s) unchecked. ` +
+      `Check the highlighted items and vote +2 again.`;
+
+    if (downgraded) {
+      // Restart the shake animation and bring the banner into view.
+      banner.classList.remove('flash');
+      void banner.offsetWidth;
+      banner.classList.add('flash');
+      banner.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+    }
+  }
+
+  render() {
+    const root = this.shadowRoot;
+    root.innerHTML = '';
+    if (this.items.length === 0) return;
+
+    const style = document.createElement('style');
+    style.textContent = `
+      :host { display: block; padding: var(--spacing-m, 8px) var(--spacing-xl, 16px); }
+      .title { font-weight: var(--font-weight-bold, bold); margin-bottom: var(--spacing-s, 4px); }
+      label { display: flex; align-items: center; gap: var(--spacing-s, 4px); padding: 2px 0; cursor: pointer; }
+      .mandatory { color: var(--error-text-color, #c5221f); font-weight: bold; }
+      .hint { color: var(--deemphasized-text-color, #666); font-style: italic; margin-top: var(--spacing-s, 4px); }
+      label.missing { background: var(--error-background, #fce8e6); border-radius: 4px; padding-left: 4px; }
+      .warning {
+        display: flex; align-items: flex-start; gap: var(--spacing-m, 8px);
+        margin: var(--spacing-s, 4px) 0 var(--spacing-m, 8px);
+        padding: var(--spacing-m, 8px) var(--spacing-l, 12px);
+        border: 1px solid var(--error-foreground, #c5221f);
+        border-left-width: 4px; border-radius: 4px;
+        background: var(--error-background, #fce8e6);
+        color: var(--primary-text-color, #202124);
+        font-weight: var(--font-weight-bold, bold);
+      }
+      .warning[hidden] { display: none; }
+      .warning .icon { color: var(--error-foreground, #c5221f); font-size: 1.2em; line-height: 1; }
+      .warning.flash { animation: flash 0.4s ease-in-out 3; }
+      @keyframes flash {
+        0%, 100% { transform: translateX(0); }
+        25% { transform: translateX(-4px); }
+        75% { transform: translateX(4px); }
+      }
+      @media (prefers-reduced-motion: reduce) { .warning.flash { animation: none; } }
+    `;
+    root.appendChild(style);
+
+    const title = document.createElement('div');
+    title.className = 'title';
+    title.textContent = 'Review checklist';
+    root.appendChild(title);
+
+    const banner = document.createElement('div');
+    banner.className = 'warning';
+    banner.setAttribute('role', 'alert');
+    banner.hidden = true;
+    const icon = document.createElement('span');
+    icon.className = 'icon';
+    icon.textContent = '⚠';
+    const bannerText = document.createElement('span');
+    bannerText.className = 'text';
+    banner.append(icon, bannerText);
+    root.appendChild(banner);
+
+    for (const item of this.items) {
+      const label = document.createElement('label');
+      if (item.mandatory) label.dataset.mandatory = '';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = item.checked;
+      box.addEventListener('change', () => {
+        item.checked = box.checked;
+        this.enforceMandatory();
+      });
+      label.appendChild(box);
+      if (item.mandatory) {
+        const star = document.createElement('span');
+        star.className = 'mandatory';
+        star.textContent = '*';
+        label.appendChild(star);
+      }
+      const text = document.createElement('span');
+      text.textContent = item.checkpoint;
+      label.appendChild(text);
+      root.appendChild(label);
+    }
+
+    if (this.items.some(i => i.mandatory)) {
+      const hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.textContent = `* mandatory – required for ${CODE_REVIEW} +2`;
+      root.appendChild(hint);
+    }
+
+    this.updateWarning(false);
+  }
+}
+
+customElements.define(PLUGIN_ELEMENT, ReviewChecklist);
 
 Gerrit.install(plugin => {
+  plugin.registerCustomComponent('reply-text', PLUGIN_ELEMENT);
 
-    plugin.registerCustomComponent(pluginHook, pluginName).onAttached(changeElement => {
-        // "save" element-reference for later use
-        hookElement = changeElement;
-        const repoName = changeElement.plugin.report.reportRepoName;
+  // Live feedback while voting in the reply dialog.
+  plugin.changeReply().addLabelValuesChangedCallback(({name}) => {
+    if (name === CODE_REVIEW && activeChecklist && activeChecklist.items.length > 0) {
+      activeChecklist.enforceMandatory();
+    }
+  });
 
-        const filePath = `/plugins/gitiles/${repoName}/+/refs/heads/master/${fileName}?format=text`;
-        var cpList = [];
-        var cpStatus = [];
+  // Final check and persistence of the checklist state when the reply is sent.
+  // Note: returning false here would leave the reply dialog disabled in Gerrit 3.14,
+  // so the vote is downgraded instead of blocking the reply.
+  plugin.on('before-reply-sent', (change, reviewInput) => {
+    const checklist = activeChecklist;
+    if (!checklist || checklist.items.length === 0) return true;
+    if (!checklist.change || checklist.change._number !== change._number) return true;
 
-        fetch(filePath)
-        .then(response=>response.text())
-        .then(data => {
-            if (data && data !== '') {
-                const urlArray = JSON.parse(atob(data));
-
-                urlArray.forEach(function(checkpoint) {
-                    cpList.push({checkpoint: checkpoint.checkpoint, mandatory: checkpoint.mandatory, resetOnNewPatchset: checkpoint.resetOnNewPatchset});
-                });
-                console.log(`# Review Checklist loaded from repository with ${cpList.length} item(s)`);
-            }
-        })
-        .catch(()=> {
-            console.log(`# Review Checklist: No existing ${fileName}, using default... `);
-
-            /* Default checklist; uncomment and fill the following lines if you want a default */
-            //cpList = [
-            //    {checkpoint: "Checkpoint 1", mandatory: true, resetOnNewPatchset: true},
-            //    {checkpoint: "Checkpoint 2", mandatory: false},
-            //    {checkpoint: "Checkpoint 3"}
-            //];
-            fillChecklist(cpList, cpStatus);
-        });
-
-        plugin.restApi().get('/accounts/self').then(accountInfo => {
-            // save _account_id
-            plugin.report.accountId = accountInfo._account_id
-        });
-
-        plugin.restApi().get(`/changes/${plugin.report.reportChangeId}?o=CURRENT_REVISION&o=MESSAGES`).then(changeInfo => {
-            // save current_revision id
-            plugin.report.revisionId = changeInfo.current_revision;
-            // save revision number, which is the first (and only) revision in the changeInfo, since "CURRENT_REVISION" was requested
-            plugin.report.revisionNumber = changeInfo.revisions[Object.keys(changeInfo.revisions)[0]]._number;
-
-            // get status of checklistpoints
-            for (let i = changeInfo.messages.length-1; i >= 0; i--) {
-                const messageArray = changeInfo.messages[i].message.split("\n");
-                const authorId = changeInfo.messages[i].author._account_id;
-                if(authorId == plugin.report.accountId && messageArray[2] == "Checklist:") {
-                    for (let j = 3; j < messageArray.length; j++) {
-                        var checked = (messageArray[j].substring(1,2)=="X");
-                        var differentPatchset = (plugin.report.revisionNumber != changeInfo.messages[i]._revision_number);
-                        cpStatus.push({checkpoint: messageArray[j].substring(4), checked: (checked?true:false), differentPatchset: differentPatchset });
-                    }
-
-                    break;
-                }
-            }
-            fillChecklist(cpList, cpStatus);
-        });
-
-        // TODO: Find other way. This only works in Gerrit 3.4.
-        const sendButton = hookElement.parentNode.host.parentNode.parentNode.querySelector(".stickyBottom").querySelector(".actions").querySelector(".right").querySelector("#sendButton").root.querySelector("paper-button");
-        sendButton.addEventListener("click", () => {
-            var checklistString = "Checklist:";
-            for (let i = 0; i < hookElement.checklistPoints.length; i++) {
-                checklistString += `\n[${hookElement.checklistPoints[i].checked?"X":" "}] `
-                                + hookElement.checklistPoints[i].checkpoint;
-            }
-
-            const reviewInput = `{"message": "${checklistString}", "notify": "NONE"}`;
-            plugin.restApi().post(`/changes/${plugin.report.reportChangeId}/revisions/${plugin.report.revisionId}/review`, reviewInput);
-        });
-    });
-
-    function fillChecklist(checklistArray, checklistStatus) {
-        hookElement.checklistPoints = [];
-        hookElement.checkpointsExists = false;
-        hookElement.mandatoryCheckpointExists = false;
-
-        for(var i=0; i<checklistArray.length; i++) {
-            hookElement.checkpointsExists = true;
-            var checked = checklistStatus[i] && checklistStatus[i].checked && !(checklistArray[i].resetOnNewPatchset && checklistStatus[i].differentPatchset);
-            hookElement.checklistPoints.push({checkpoint: checklistArray[i].checkpoint, mandatory: checklistArray[i].mandatory, checked: checked});
-            if(checklistArray[i].mandatory == true) hookElement.mandatoryCheckpointExists = true;
-        }
+    const unchecked = checklist.uncheckedMandatoryCount();
+    if (unchecked > 0 && reviewInput.labels && labelValueAsNumber(reviewInput.labels[CODE_REVIEW]) === 2) {
+      reviewInput.labels[CODE_REVIEW] = 1;
+      checklist.alert(`${CODE_REVIEW} +2 was reduced to +1: ${unchecked} mandatory checklist item(s) unchecked.`);
     }
 
-    // prevent +2 Code-Review label if mandatory checklistpoint is not checked
-    replyApi = plugin.changeReply();
-    replyApi.addLabelValuesChangedCallback(({name, value}) => {
-        evaluateCodeReviewLabel(name, false);
-    });
+    const state = checklist.toStateMessage();
+    reviewInput.message = reviewInput.message ? `${reviewInput.message}\n\n${state}` : state;
+    return true;
+  });
 });
